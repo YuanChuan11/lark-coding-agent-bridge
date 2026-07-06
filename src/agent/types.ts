@@ -23,6 +23,16 @@ export type AgentEvent =
       threadId?: string;
       terminationReason: 'normal' | 'interrupted' | 'timeout';
     }
+  | { type: 'compact'; phase: 'started' }
+  | {
+      type: 'compact';
+      phase: 'finished';
+      ok: boolean;
+      preTokens?: number;
+      postTokens?: number;
+      durationMs?: number;
+      error?: string;
+    }
   | { type: 'error'; message: string; terminationReason: 'failed' | 'interrupted' | 'timeout' };
 
 export const CLAUDE_DEFAULT_PERMISSION_MODE: ClaudePermissionMode = 'bypassPermissions';

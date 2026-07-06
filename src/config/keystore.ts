@@ -1,9 +1,9 @@
 import { createCipheriv, createDecipheriv, pbkdf2Sync, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { hostname, userInfo } from 'node:os';
+import { userInfo } from 'node:os';
+import { writeFileAtomic } from '../platform/atomic-write';
 import type { AppPaths } from './app-paths';
 import { paths } from './paths';
-import { writeFileAtomic } from '../platform/atomic-write';
 
 /**
  * Local AES-256-GCM keystore for App Secrets and similar.
@@ -88,7 +88,7 @@ async function deriveKey(storePaths: KeystorePaths = paths): Promise<Buffer> {
   const cached = derivedKeyCache.get(cacheKey);
   if (cached) return cached;
   const salt = await loadOrCreateSalt(storePaths);
-  const seed = `${hostname()}|${userInfo().username}`;
+  const seed = userInfo().username;
   const key = pbkdf2Sync(seed, salt, PBKDF2_ITER, KEY_LEN, 'sha256');
   derivedKeyCache.set(cacheKey, key);
   return key;

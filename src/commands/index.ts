@@ -5,7 +5,7 @@ import { dirname, isAbsolute } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { claudeCapability, codexCapability } from '../agent/capability';
 import { DEFAULT_MODEL, normalizeModelSelection, supportedModels } from '../agent/models';
-import type { AgentAdapter } from '../agent/types';
+import type { AgentAdapter, AgentEvent } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import {
   accountCurrentCard,
@@ -62,6 +62,10 @@ import {
   reduce,
   type RunState,
 } from '../card/run-state';
+import {
+  handleModelCommand,
+  MODEL_COMMAND_HELP_LINE,
+} from '../extensions/model-command/index.js';
 import { formatRelTime, listRecentSessions, type SessionSummary } from '../session/history';
 import {
   listCodexThreadHistory,
@@ -73,6 +77,7 @@ import { isAlive, readAndPrune, resolveTarget } from '../runtime/registry';
 import type { SessionStore } from '../session/store';
 import { resolveWorkingDirectory } from '../policy/workspace';
 import { evaluateRunPolicy } from '../policy/run-policy';
+import { recordRunSessionEvent } from '../bot/run-flow';
 import type { ProcessPool } from '../bot/process-pool';
 import type { RunExecutor } from '../runtime/run-executor';
 import { RunRejected } from '../runtime/errors';
@@ -166,10 +171,12 @@ const handlers: Record<string, Handler> = {
   '/ws': handleWs,
   '/resume': handleResume,
   '/status': handleStatus,
+  '/model': handleModelCommand,
   '/help': handleHelp,
   '/account': handleAccount,
   '/config': handleConfig,
   '/stop': handleStop,
+  '/compact': handleCompact,
   '/timeout': handleTimeout,
   '/ps': handlePs,
   '/exit': handleExit,
@@ -589,7 +596,7 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
       ? issueResumeCandidate(identity, { sessionId: s.sessionId })
       : s.sessionId,
     displayId: s.sessionId,
-    preview: s.preview,
+    preview: s.summary ? `${s.summary}\n${s.preview}` : s.preview,
     relTime: formatRelTime(s.mtime),
     lineCount: s.lineCount,
     current: s.sessionId === currentSession?.sessionId,
@@ -833,6 +840,174 @@ function formatOwnerState(ctx: CommandContext): string {
     ? ` refreshed=${new Date(ctx.controls.ownerRefreshedAt).toISOString()}`
     : '';
   return `${state} owner=${owner}${refreshed}`;
+}
+
+type CompactFinishedEvent = Extract<AgentEvent, { type: 'compact'; phase: 'finished' }>;
+
+async function handleCompact(args: string, ctx: CommandContext): Promise<void> {
+  const trimmed = args.trim();
+  if (ctx.controls.profileConfig.agentKind !== 'claude') {
+    await reply(ctx, '❌ 仅 Claude Code agent 支持 /compact。');
+    return;
+  }
+
+  const requestedCwd = effectiveWorkspaceCwd(ctx);
+  if (!requestedCwd) {
+    await reply(ctx, '❌ 请先使用 `/cd <path>` 设置工作目录。');
+    return;
+  }
+
+  const workspace = await resolveWorkingDirectory(requestedCwd);
+  if (!workspace.ok) {
+    await reply(ctx, workspace.userVisible);
+    return;
+  }
+
+  const sessionId = resolveClaudeSessionId(ctx, workspace.cwdRealpath);
+  if (!sessionId) {
+    await reply(ctx, '❌ 当前无会话，请先发送一条消息再使用 `/compact`。');
+    return;
+  }
+
+  if (!ctx.runExecutor) {
+    await reply(ctx, '❌ 运行时不可用，无法执行压缩。');
+    return;
+  }
+
+  const wasRunning = ctx.activeRuns.interrupt(ctx.scope);
+  log.info('command', 'compact', {
+    scope: ctx.scope,
+    interrupted: wasRunning,
+    hasInstructions: trimmed.length > 0,
+  });
+  await reply(
+    ctx,
+    wasRunning ? '⏳ 正在压缩上下文…（已中断当前任务）' : '⏳ 正在压缩上下文…',
+  );
+
+  const capability = claudeCapability(ctx.controls.profileConfig);
+  const access =
+    ctx.msg.chatType === 'p2p'
+      ? canUseDm(ctx.controls.profileConfig, ctx.controls, ctx.msg.senderId)
+      : canUseGroup(ctx.controls.profileConfig, ctx.controls, ctx.msg.chatId, ctx.msg.senderId);
+  const prompt = trimmed ? `/compact ${trimmed}` : '/compact';
+  const now = Date.now();
+  const policy = evaluateRunPolicy({
+    scope: {
+      source: 'im',
+      chatId: ctx.msg.chatId,
+      actorId: ctx.msg.senderId,
+      ...(ctx.msg.threadId ? { threadId: ctx.msg.threadId } : {}),
+    },
+    attachments: [],
+    prompt,
+    requestedCwd,
+    cwdRealpath: workspace.cwdRealpath,
+    access,
+    capability,
+    profileConfig: ctx.controls.profileConfig,
+    now,
+    ttlMs: 120_000,
+  });
+  if (!policy.ok) {
+    await reply(ctx, `❌ ${policy.rejectReason.userVisible}`);
+    return;
+  }
+
+  let execution: Awaited<ReturnType<RunExecutor['submit']>>;
+  try {
+    execution = await ctx.runExecutor.submit({
+      scopeId: `${ctx.scope}:compact`,
+      policy,
+      sessionId,
+      nowait: true,
+      stopGraceMs: getAgentStopGraceMs(ctx.controls.cfg),
+      observability: {
+        profile: ctx.controls.profile,
+        agent: capability.agentId,
+        source: 'compact',
+        stage: 'context-compact',
+      },
+    });
+  } catch (err) {
+    if (err instanceof RunRejected && err.code === 'pool-full') {
+      await reply(ctx, '❌ 进程池已满，请稍后再试 `/compact`。');
+      return;
+    }
+    log.fail('command', err, { step: 'compact.submit' });
+    reportMetric('command_fail', 1, { step: 'compact.submit' });
+    await reply(ctx, '❌ 压缩启动失败，请稍后重试。');
+    return;
+  }
+
+  let compactFinished: CompactFinishedEvent | undefined;
+  let fallbackError: string | undefined;
+
+  try {
+    for await (const evt of execution.subscribe()) {
+      if (evt.type === 'system' && evt.sessionId) {
+        recordRunSessionEvent({
+          scopeId: ctx.scope,
+          sessions: ctx.sessions,
+          sessionCatalog: ctx.sessionCatalog,
+          capability,
+          policy,
+          event: evt,
+        });
+      }
+      if (evt.type === 'compact' && evt.phase === 'finished') {
+        compactFinished = evt;
+      }
+      if (evt.type === 'text' && evt.delta.trim() && !compactFinished) {
+        fallbackError = evt.delta.trim();
+      }
+      if (evt.type === 'error') {
+        await reply(ctx, `❌ 压缩失败：${evt.message}`);
+        return;
+      }
+    }
+  } catch (err) {
+    log.fail('command', err, { step: 'compact.stream' });
+    reportMetric('command_fail', 1, { step: 'compact.stream' });
+    await reply(ctx, '❌ 压缩过程出错，请稍后重试。');
+    return;
+  } finally {
+    await execution.stop().catch(() => {});
+  }
+
+  if (compactFinished) {
+    await reply(ctx, formatCompactReply(compactFinished));
+    return;
+  }
+  if (fallbackError) {
+    await reply(ctx, `❌ 无法压缩：${fallbackError}`);
+    return;
+  }
+  await reply(ctx, '❌ 压缩未返回结果，请稍后重试。');
+}
+
+function resolveClaudeSessionId(ctx: CommandContext, cwdRealpath: string): string | undefined {
+  const identity = ctx.sessionCatalogIdentity;
+  if (ctx.sessionCatalog && identity?.agentId === 'claude') {
+    const entry = ctx.sessionCatalog.activeFor(identity);
+    if (entry?.sessionId && entry.cwdRealpath === cwdRealpath) {
+      return entry.sessionId;
+    }
+  }
+  return ctx.sessions.resumeFor(ctx.scope, cwdRealpath);
+}
+
+function formatCompactReply(result: CompactFinishedEvent): string {
+  if (result.ok) {
+    const pre = result.preTokens ?? '?';
+    const post = result.postTokens ?? '?';
+    const duration =
+      result.durationMs !== undefined && result.durationMs > 0
+        ? `（${Math.round(result.durationMs / 1000)}s）`
+        : '';
+    return `✅ 上下文已压缩：${pre} → ${post} tokens${duration}`;
+  }
+  return `❌ 无法压缩：${result.error ?? '未知原因'}`;
 }
 
 async function handleStop(args: string, ctx: CommandContext): Promise<void> {
@@ -1319,7 +1494,7 @@ function formatDoctorEchoStatus(echoText: string, state: RunState): string {
 }
 
 async function handleHelp(_args: string, ctx: CommandContext): Promise<void> {
-  const card = helpCard(ctx.agent.displayName);
+  const card = helpCard(ctx.agent.displayName, MODEL_COMMAND_HELP_LINE);
   await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
 }
 

@@ -16,7 +16,9 @@ import {
   type AgentRun,
   type AgentRunOptions,
 } from '../types';
+import { buildClaudeArgv } from './argv.js';
 import { translateEvent } from './stream-json';
+import { resolveClaudeBridgeVariant } from './variant';
 
 export interface ClaudeAdapterOptions {
   binary?: string;
@@ -70,18 +72,12 @@ export class ClaudeAdapter implements AgentAdapter {
     // special characters ever reach the shell.
     const systemPromptFile = writeSystemPromptFile(buildBridgeSystemPrompt(this.botIdentity));
 
-    const args = [
-      '-p',
-      '--output-format',
-      'stream-json',
-      '--verbose',
-      '--permission-mode',
-      opts.permissionMode ?? CLAUDE_DEFAULT_PERMISSION_MODE,
-      '--append-system-prompt-file',
-      systemPromptFile.path,
-    ];
-    if (opts.sessionId) args.push('--resume', opts.sessionId);
-    if (opts.model) args.push('--model', opts.model);
+    const args = buildClaudeArgv({
+      permissionMode: opts.permissionMode ?? CLAUDE_DEFAULT_PERMISSION_MODE,
+      sessionId: opts.sessionId,
+      model: opts.model,
+      systemPromptFile: systemPromptFile.path,
+    });
 
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
@@ -95,6 +91,7 @@ export class ClaudeAdapter implements AgentAdapter {
       hasSession: Boolean(opts.sessionId),
       promptChars: opts.prompt.length,
       model: opts.model,
+      variant: resolveClaudeBridgeVariant() ?? 'default',
     });
 
     // Listeners MUST be attached synchronously here, before we return.

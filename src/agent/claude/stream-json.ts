@@ -18,6 +18,15 @@ interface ClaudeRawEvent {
   session_id?: string;
   cwd?: string;
   model?: string;
+  status?: string | null;
+  compact_result?: string;
+  compact_error?: string;
+  compact_metadata?: {
+    pre_tokens?: number;
+    post_tokens?: number;
+    duration_ms?: number;
+    trigger?: string;
+  };
   message?: { content?: ContentBlock[] };
   usage?: {
     input_tokens?: number;
@@ -30,6 +39,34 @@ interface ClaudeRawEvent {
 export function* translateEvent(raw: unknown): Generator<AgentEvent> {
   if (!raw || typeof raw !== 'object') return;
   const evt = raw as ClaudeRawEvent;
+
+  if (evt.type === 'system' && evt.subtype === 'status' && evt.status === 'compacting') {
+    yield { type: 'compact', phase: 'started' };
+    return;
+  }
+
+  if (evt.type === 'system' && evt.subtype === 'status' && evt.compact_result === 'failed') {
+    yield {
+      type: 'compact',
+      phase: 'finished',
+      ok: false,
+      error: evt.compact_error ?? 'Compaction failed',
+    };
+    return;
+  }
+
+  if (evt.type === 'system' && evt.subtype === 'compact_boundary' && evt.compact_metadata) {
+    const meta = evt.compact_metadata;
+    yield {
+      type: 'compact',
+      phase: 'finished',
+      ok: true,
+      preTokens: meta.pre_tokens,
+      postTokens: meta.post_tokens,
+      durationMs: meta.duration_ms,
+    };
+    return;
+  }
 
   if (evt.type === 'system' && evt.subtype === 'init') {
     yield {

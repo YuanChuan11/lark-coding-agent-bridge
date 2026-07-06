@@ -17,7 +17,9 @@
   },
   "homepage": "https://github.com/zarazhangrui/feishu-claude-code-bridge#readme",
   "bin": {
-    "lark-channel-bridge": "./bin/lark-channel-bridge.mjs"
+    "lark-channel-bridge": "./bin/lark-channel-bridge.mjs",
+    "lark-channel-bridge-mybot": "./bin/lark-channel-bridge-mybot.mjs",
+    "lark-channel-bridge-workbot": "./bin/lark-channel-bridge-workbot.mjs"
   },
   "exports": {
     ".": {

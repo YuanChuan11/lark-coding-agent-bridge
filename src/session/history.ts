@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import { readdir, stat } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -10,6 +10,7 @@ export interface SessionSummary {
   mtime: number;
   preview: string;
   lineCount: number;
+  summary?: string;
 }
 
 function encodeCwd(cwd: string): string {
@@ -30,6 +31,8 @@ export async function listRecentSessions(cwd: string, limit = 5): Promise<Sessio
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw err;
   }
+
+  const indexSummaries = await loadSessionsIndex(dir);
 
   const jsonls = files.filter((f) => f.endsWith('.jsonl'));
   const withStats = await Promise.all(
@@ -52,20 +55,57 @@ export async function listRecentSessions(cwd: string, limit = 5): Promise<Sessio
   return Promise.all(
     sorted.map(async (entry) => {
       const sessionId = entry.file.replace(/\.jsonl$/, '');
-      const { preview, lineCount } = await summarize(entry.path);
-      return { sessionId, mtime: entry.mtime, preview, lineCount };
+      const { preview, lineCount, customTitle } = await summarize(entry.path);
+      const summary = customTitle ?? indexSummaries.get(sessionId);
+      return { sessionId, mtime: entry.mtime, preview, lineCount, ...(summary ? { summary } : {}) };
     }),
   );
 }
 
-async function summarize(path: string): Promise<{ preview: string; lineCount: number }> {
+async function loadSessionsIndex(dir: string): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  try {
+    const text = await readFile(join(dir, 'sessions-index.json'), 'utf8');
+    const parsed = JSON.parse(text) as { entries?: unknown[] };
+    if (Array.isArray(parsed.entries)) {
+      for (const entry of parsed.entries) {
+        if (
+          entry &&
+          typeof entry === 'object' &&
+          typeof (entry as { sessionId?: unknown }).sessionId === 'string' &&
+          typeof (entry as { summary?: unknown }).summary === 'string' &&
+          (entry as { summary: string }).summary.trim()
+        ) {
+          map.set(
+            (entry as { sessionId: string }).sessionId,
+            (entry as { summary: string }).summary.trim(),
+          );
+        }
+      }
+    }
+  } catch {
+    // missing or malformed — ignore
+  }
+  return map;
+}
+
+async function summarize(path: string): Promise<{ preview: string; lineCount: number; customTitle?: string }> {
   const stream = createReadStream(path, { encoding: 'utf8' });
   const rl = createInterface({ input: stream });
   let preview = '';
+  let customTitle: string | undefined;
   let lineCount = 0;
   try {
     for await (const line of rl) {
       lineCount++;
+      if (line.includes('"custom-title"')) {
+        try {
+          const obj = JSON.parse(line) as { type?: string; customTitle?: unknown };
+          if (obj.type === 'custom-title' && typeof obj.customTitle === 'string' && obj.customTitle.trim()) {
+            customTitle = obj.customTitle.trim();
+          }
+        } catch { /* malformed line */ }
+      }
       if (!preview && line.includes('"type":"user"')) {
         try {
           const obj = JSON.parse(line) as { type?: string; message?: { content?: unknown } };
@@ -73,18 +113,15 @@ async function summarize(path: string): Promise<{ preview: string; lineCount: nu
             const text = extractUserText(obj.message.content);
             if (text) preview = normalizeSessionPreview(text);
           }
-        } catch {
-          /* malformed line */
-        }
+        } catch { /* malformed line */ }
       }
-      // reading the whole file is fine — sessions are usually under 10k lines
       if (lineCount > 20_000) break;
     }
   } finally {
     rl.close();
     stream.destroy();
   }
-  return { preview: preview || '(空会话)', lineCount };
+  return { preview: preview || '(空会话)', lineCount, ...(customTitle ? { customTitle } : {}) };
 }
 
 function extractUserText(content: unknown): string {

@@ -64,6 +64,67 @@ describe('ClaudeAdapter process contract', () => {
     expect(record.systemPrompt).not.toContain('__claude_cb');
     expect(record.argv).not.toContain('--resume');
     expect(record.argv).not.toContain('--model');
+    expect(record.argv).not.toContain('-force-use-model');
+  });
+
+  it('appends mybot default model args when LARK_CHANNEL_VARIANT=mybot', async () => {
+    const fake = await createFakeClaude({
+      lines: [{ type: 'result', session_id: 'sess-mybot' }],
+    });
+    cleanup.push(fake.dir);
+    const prev = process.env.LARK_CHANNEL_VARIANT;
+    process.env.LARK_CHANNEL_VARIANT = 'mybot';
+
+    try {
+      const run = new ClaudeAdapter({ binary: fake.path }).run({
+        runId: 'run-mybot',
+        prompt: 'mybot',
+        cwd: fake.dir,
+      });
+      await collect(run.events);
+      const record = await readRecord(fake.recordPath);
+      expect(record.argv).toEqual(
+        expect.arrayContaining([
+          '-force-use-model',
+          'dashscope/glm-5.2',
+          '--effort',
+          'high',
+        ]),
+      );
+    } finally {
+      if (prev === undefined) delete process.env.LARK_CHANNEL_VARIANT;
+      else process.env.LARK_CHANNEL_VARIANT = prev;
+    }
+  });
+
+  it('appends workbot default model args when LARK_CHANNEL_VARIANT=workbot', async () => {
+    const fake = await createFakeClaude({
+      lines: [{ type: 'result', session_id: 'sess-workbot' }],
+    });
+    cleanup.push(fake.dir);
+    const prev = process.env.LARK_CHANNEL_VARIANT;
+    process.env.LARK_CHANNEL_VARIANT = 'workbot';
+
+    try {
+      const run = new ClaudeAdapter({ binary: fake.path }).run({
+        runId: 'run-workbot',
+        prompt: 'workbot',
+        cwd: fake.dir,
+      });
+      await collect(run.events);
+      const record = await readRecord(fake.recordPath);
+      expect(record.argv).toEqual(
+        expect.arrayContaining([
+          '-force-use-model',
+          'claude-opus-4-6',
+          '--effort',
+          'xhigh',
+        ]),
+      );
+    } finally {
+      if (prev === undefined) delete process.env.LARK_CHANNEL_VARIANT;
+      else process.env.LARK_CHANNEL_VARIANT = prev;
+    }
   });
 
   it('injects the active bridge profile env into spawned runs', async () => {

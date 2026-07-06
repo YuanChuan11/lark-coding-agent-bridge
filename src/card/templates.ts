@@ -177,7 +177,7 @@ export function resumeCard(cwd: string, entries: ResumeEntry[]): object {
   return shell('🔁 恢复历史会话', elements);
 }
 
-export function helpCard(agentName = 'Agent'): object {
+export function helpCard(agentName = 'Agent', extraHelpLine?: string): object {
   const escapedAgentName = escapeMd(agentName);
   return shell('💡 使用帮助', [
     divMd(
@@ -185,6 +185,7 @@ export function helpCard(agentName = 'Agent'): object {
         '**命令列表**',
         '',
         '- `/new` `/reset` — 清空当前 chat 的会话',
+        '- `/compact [instructions]` — 压缩当前会话上下文（保留 session，会调用模型摘要）',
         '- `/new chat [name]` — 新建群+新会话，自动拉你进群',
         '- `/resume [N]` — 列出并恢复历史会话（最多 N 条）',
         '- `/cd <path>` — 切换工作目录（会重置 session）',
@@ -192,6 +193,7 @@ export function helpCard(agentName = 'Agent'): object {
         '- `/account` — 查看当前应用；`/account change` 换 appId/secret 并重连',
         '- `/config` — 调整偏好、访问控制和 lark-cli 身份策略',
         '- `/status` — 当前状态',
+        ...(extraHelpLine ? [extraHelpLine] : []),
         '- `/stop` — 结束当前正在跑的任务（也可点卡片底部 ⏹ 终止 按钮）',
         '- `/stop comment:<scopeHash>` — 管理员停止云文档评论任务',
         '- `/timeout [N|off|default]` — 当前 session 的探活分钟数,`/config` 改全局默认',

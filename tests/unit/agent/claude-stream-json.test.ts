@@ -83,6 +83,54 @@ describe('Claude stream-json translator', () => {
     expect([...translateEvent({ type: 'result', session_id: 'sess-2' })][0]).not.toHaveProperty('threadId');
   });
 
+  it('translates compact lifecycle events', () => {
+    expect([
+      ...translateEvent({
+        type: 'system',
+        subtype: 'status',
+        status: 'compacting',
+      }),
+    ]).toEqual([{ type: 'compact', phase: 'started' }]);
+
+    expect([
+      ...translateEvent({
+        type: 'system',
+        subtype: 'status',
+        status: null,
+        compact_result: 'failed',
+        compact_error: 'Not enough messages to compact.',
+      }),
+    ]).toEqual([
+      {
+        type: 'compact',
+        phase: 'finished',
+        ok: false,
+        error: 'Not enough messages to compact.',
+      },
+    ]);
+
+    expect([
+      ...translateEvent({
+        type: 'system',
+        subtype: 'compact_boundary',
+        compact_metadata: {
+          pre_tokens: 1000,
+          post_tokens: 200,
+          duration_ms: 12_500,
+        },
+      }),
+    ]).toEqual([
+      {
+        type: 'compact',
+        phase: 'finished',
+        ok: true,
+        preTokens: 1000,
+        postTokens: 200,
+        durationMs: 12_500,
+      },
+    ]);
+  });
+
   it('ignores unknown, empty, and incomplete raw events', () => {
     expect([...translateEvent(null)]).toEqual([]);
     expect([...translateEvent({ type: 'assistant', message: { content: [{ type: 'text', text: '' }] } })]).toEqual([]);
